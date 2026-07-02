@@ -99,7 +99,7 @@ int main()
     render->setOnRender([] {
         AppInstance* a = AppInstance::GetSingleton();
         Time::getSingleton()->NewFrame();
-        a->currentScene->Update();
+        a->currentScene->Update();        // per-frame game logic (fixed-step runs on its own thread)
         a->currentScene->Render(a->render);
     });
 
@@ -164,8 +164,10 @@ int main()
     }
 
     cout << "[player]\t\t" << "Running." << endl;
+    app->StartFixedThread();   // fixed-frequency update (physics + FixedUpdate), frame-independent
     render->loop();
 
+    app->StopFixedThread();
     UnloadModules();   // runtime plugins first, then the render provider (its Shutdown deinits)
     return 0;
 }
