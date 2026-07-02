@@ -1,0 +1,171 @@
+// NukePlayer — the runtime host (ships a game, no editor).
+//
+// Same host plumbing as the editor minus all editor/UI: it loads the renderer module and
+// gameplay plugins, loads a .nuworld, then each frame ticks time, runs game logic
+// (World::Update) and renders (World::Render). Cameras render to the backbuffer (target 0),
+// so the scene fills the window (the editor instead renders into an offscreen RT).
+
+#include <NukeEngine.h>                 // bst/bc aliases + NUKEENGINE_API
+#include <interface/AppInstance.h>
+#include <interface/Modular.h>
+#include <interface/Services.h>
+#include <config.h>
+#include <input/keyboard.h>
+#include <input/mouse.h>
+#include <API/Model/World.h>
+#include <API/Model/Atom.h>
+#include <API/Model/resdb.h>
+#include <API/Model/Camera.h>
+#include <API/Model/Time.h>
+
+#include <nlohmann/json.hpp>
+#include <boost/filesystem/fstream.hpp>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+namespace bfs = boost::filesystem;
+using namespace std;
+using namespace nuke;
+
+static const char* kWorld = "scene.nuworld";
+
+int main()
+{
+    AppInstance* app = AppInstance::GetSingleton();
+    app->setEditor(false);   // not the editor — plugins see isEditor() == false
+    cout << "[player]\t\t" << "NukePlayer starting..." << endl;
+
+    // The project manifest drives everything below (default world, AA/HDR, plugin list,
+    // service providers) — parse it first. No .nuproj -> defaults (a packaged game ships one).
+    std::string startupWorld = kWorld;
+    int   msaaSamples = 4;
+    bool  hdrEnabled  = true;
+    float hdrPaperWhite = 200.0f, hdrPeak = 1000.0f;
+    std::vector<std::string> enabledPlugins; bool haveList = false;
+    std::string renderChoice;                // services.render: which dll provides the renderer
+    {
+        bfs::ifstream pf(bfs::path("project/game.nuproj"));
+        if (pf)
+        {
+            nlohmann::json pj = nlohmann::json::parse(pf, nullptr, false);
+            if (!pj.is_discarded())
+            {
+                startupWorld = pj.value("startupWorld", startupWorld);
+                msaaSamples  = pj.value("msaa", 4);
+                hdrEnabled   = pj.value("hdr", true);
+                hdrPaperWhite = pj.value("hdrPaperWhite", 200.0f);
+                hdrPeak       = pj.value("hdrPeak", 1000.0f);
+                if (pj.contains("plugins") && pj["plugins"].is_array())
+                {
+                    haveList = true;
+                    for (auto& p : pj["plugins"]) enabledPlugins.push_back(p.get<std::string>());
+                }
+                if (pj.contains("services") && pj["services"].is_object())
+                    renderChoice = pj["services"].value("render", std::string());
+            }
+        }
+    }
+
+    // Two-phase startup, phase 1 (PHASE_BOOT): discover the pool, enable the project's
+    // render provider, get its iRender through the service registry.
+    cout << "[player]\t\t" << "Loading modules..." << endl;
+    InitModules(app);
+    NUKEModule* renderPlugin = FindServiceProvider("render", renderChoice);
+    if (!renderPlugin)
+    {
+        cout << "[player]\t\t" << "No render provider found in modules/. Aborting." << endl;
+        return 1;
+    }
+    EnablePlugin(renderPlugin);
+    iRender* render = GetService<iRender>();
+    if (!render)
+    {
+        cout << "[player]\t\t" << "Render provider '" << renderPlugin->title
+             << "' registered no iRender. Aborting." << endl;
+        return 1;
+    }
+    app->render = render;
+
+    app->contentRoot = "project/content";   // content paths (scripts etc.) resolve in the project
+
+    Config* config = Config::getSingleton();
+    app->config   = config;
+    app->keyboard = KeyBoard::getSingleton();
+    app->mouse    = Mouse::getSingleton();
+    app->playState = 1;   // the Player is always "playing" (so runtime systems like NukeGUI run)
+
+    // The per-frame game tick: advance time, run logic, draw. No editor, no PIE gating —
+    // the game logic always runs.
+    render->setOnRender([] {
+        AppInstance* a = AppInstance::GetSingleton();
+        Time::getSingleton()->NewFrame();
+        a->currentScene->Update();
+        a->currentScene->Render(a->render);
+    });
+
+    WindowDesc wd;
+    wd.w = config->window.w; wd.h = config->window.h;
+    wd.title       = config->window.title.c_str();
+    wd.decorated   = config->window.decorated;
+    wd.resizable   = config->window.resizable;
+    wd.floating    = config->window.floating;
+    wd.maximized   = config->window.maximized;
+    wd.fullscreen  = config->window.fullscreen;
+    wd.transparent = config->window.transparent;
+    wd.opacity     = config->window.opacity;
+    wd.backend     = config->window.backend;   // D3D11 / D3D12
+
+    // Phase 2 (PHASE_RUNTIME): activate THIS project's chosen plugins (the load list in
+    // project/game.nuproj). OnLoad registers their component types BEFORE we deserialize
+    // the world; types from plugins not in the list load as inert placeholders. No list ->
+    // load everything discovered (a packaged game ships its plugins). Boot providers are
+    // driven by "services", not the plugin list — skip them here.
+    for (auto& m : GetModules())
+    {
+        if (m->phase() == PHASE_BOOT) continue;
+        bool want = !haveList ||
+            std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+        if (want) EnablePlugin(m.get());
+    }
+
+    LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
+    render->setMSAA(msaaSamples);            // before init: pipelines build at the right sample count
+    render->setHDR(hdrEnabled);              // before init: scene format (RGBA16F / RGBA8)
+    render->setHDROutput(hdrEnabled);        // before init: HDR10 display output (Player only; SDR fallback if no HDR display)
+    render->setHDRNits(hdrPaperWhite, hdrPeak);
+    render->init(wd);
+    cout << "[player]\t\t" << "Renderer ready." << endl;
+
+    // Load the project's assets so the world resolves meshGuid/matGuid/shaderGuid references.
+    ResDB::getSingleton()->LoadContentDir(app->contentRoot);
+    ResDB::getSingleton()->LoadShadersDir("shaders");
+    ResDB::getSingleton()->LoadShadersDir(app->contentRoot);
+    ResDB::getSingleton()->BuildShaderPipelines(render);
+    ResDB::getSingleton()->CreateRenderTextures(render);   // RTs for RenderTextures
+
+    // Load the project's default world from content (game: load project -> load its default world).
+    cout << "[player]\t\t" << "Loading default world '" << startupWorld << "'..." << endl;
+    if (!app->OpenWorld(startupWorld))
+        app->currentScene->LoadFromFile(kWorld);   // fallback: legacy world next to the exe
+
+    // Fallback: a world authored in the editor has no camera (the editor camera is excluded
+    // from saves). Add a default one so the game still shows something.
+    bool hasCam = false;
+    for (Atom* go : app->currentScene->GetHierarchy())
+        if (go && go->GetComponent<Camera>()) { hasCam = true; break; }
+    if (!hasCam)
+    {
+        Atom* camAtom = new Atom("Main Camera");
+        Camera* cam = new Camera(camAtom, render);   // renderTarget defaults to 0 -> backbuffer
+        cam->fov = 60.0f;
+        cam->transform->position = { 0, 0, -5 };
+        app->currentScene->Add(camAtom);
+        cout << "[player]\t\t" << "World had no camera — added a default Main Camera." << endl;
+    }
+
+    cout << "[player]\t\t" << "Running." << endl;
+    render->loop();
+
+    UnloadModules();   // runtime plugins first, then the render provider (its Shutdown deinits)
+    return 0;
+}

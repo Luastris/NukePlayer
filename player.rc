@@ -1,0 +1,5 @@
+// Player application icon. To rebrand for release, just replace icon.ico (same name)
+// and rebuild — the renderer picks up the exe's first icon automatically (ExtractIconEx).
+#include <windows.h>
+
+MAINICON ICON "icon.ico"
