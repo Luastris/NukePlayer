@@ -17,6 +17,7 @@
 #include <API/Model/resdb.h>
 #include <API/Model/Camera.h>
 #include <API/Model/Time.h>
+#include <API/Model/Jobs.h>     // core job system (2.4)
 
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -165,9 +166,11 @@ int main()
 
     cout << "[player]\t\t" << "Running." << endl;
     app->StartFixedThread();   // fixed-frequency update (physics + FixedUpdate), frame-independent
+    nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
     render->loop();
 
     app->StopFixedThread();
+    nuke::Jobs::Shutdown();
     UnloadModules();   // runtime plugins first, then the render provider (its Shutdown deinits)
     return 0;
 }
