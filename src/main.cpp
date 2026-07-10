@@ -15,6 +15,7 @@
 #include <API/Model/World.h>
 #include <API/Model/Atom.h>
 #include <API/Model/resdb.h>
+#include <API/Model/Package.h>   // packed game + mod overlays (3.2)
 #include <API/Model/Camera.h>
 #include <API/Model/Time.h>
 #include <API/Model/Jobs.h>     // core job system (2.4)
@@ -36,8 +37,36 @@ int main()
     app->setEditor(false);   // not the editor — plugins see isEditor() == false
     cout << "[player]\t\t" << "NukePlayer starting..." << endl;
 
+    // Packed vs raw (3.2). A shipped game carries content/game.nupak (the dist layout keeps
+    // the root clean); the raw project/ tree is the DEV path and exists only in dev builds —
+    // a RELEASE Player refuses to run without a pak (release-release opens no raw projects).
+    std::string pakPath;
+    {
+        boost::system::error_code ec;
+        if      (bfs::exists("content/game.nupak", ec)) pakPath = "content/game.nupak";
+        else if (bfs::exists("game.nupak", ec))         pakPath = "game.nupak";
+    }
+    const bool packed = !pakPath.empty();
+    if (packed)
+    {
+        if (!Package::Mount(pakPath, 0)) { cout << "[player]\t\t" << "Bad package: " << pakPath << ". Aborting." << endl; return 1; }
+        // Mods: config/mods.json {"mods": ["mods/foo.numod", ...]} — user-editable next to
+        // the game (the project pak stays immutable). MountMods resolves paths tolerantly
+        // and orders by DEPENDENCIES (a mod's "requires" from its mod.json mount below it;
+        // config order among independents; missing dependency -> the mod is skipped).
+        Package::MountMods(".");
+    }
+#ifdef NDEBUG
+    else
+    {
+        cout << "[player]\t\t" << "No content/game.nupak found. A release Player runs PACKED games only "
+             << "(package the project from the editor: File -> Package Project)." << endl;
+        return 1;
+    }
+#endif
+
     // The project manifest drives everything below (default world, AA/HDR, plugin list,
-    // service providers) — parse it first. No .nuproj -> defaults (a packaged game ships one).
+    // service providers) — from the pak when packed, from project/game.nuproj when raw.
     std::string startupWorld = kWorld;
     int   msaaSamples = 4;
     bool  hdrEnabled  = true;
@@ -45,10 +74,16 @@ int main()
     std::vector<std::string> enabledPlugins; bool haveList = false;
     std::string renderChoice;                // services.render: which dll provides the renderer
     {
-        bfs::ifstream pf(bfs::path("project/game.nuproj"));
-        if (pf)
+        std::string manifest;
+        if (packed) Package::Read("game.nuproj", manifest);
+        else
         {
-            nlohmann::json pj = nlohmann::json::parse(pf, nullptr, false);
+            bfs::ifstream pf(bfs::path("project/game.nuproj"));
+            if (pf) manifest.assign(std::istreambuf_iterator<char>(pf), std::istreambuf_iterator<char>());
+        }
+        if (!manifest.empty())
+        {
+            nlohmann::json pj = nlohmann::json::parse(manifest, nullptr, false);
             if (!pj.is_discarded())
             {
                 startupWorld = pj.value("startupWorld", startupWorld);
@@ -87,7 +122,9 @@ int main()
     }
     app->render = render;
 
-    app->contentRoot = "project/content";   // content paths (scripts etc.) resolve in the project
+    // Content paths (scripts etc.): packed -> the Package layer stack owns resolution
+    // (ResolveContent consults the mounts); raw -> the dev project tree.
+    app->contentRoot = packed ? "" : "project/content";
 
     Config* config = Config::getSingleton();
     app->config   = config;
@@ -129,7 +166,12 @@ int main()
         if (want) EnablePlugin(m.get());
     }
 
-    LoadBuiltinShaders(render, "shaders");   // engine loads built-in shaders + feeds the renderer
+    // Built-in shaders: a packed game carries them INSIDE game.nupak ("shaders/" entries) —
+    // no loose shaders/ dir ships, and mods can override any of them. Older dists (loose
+    // shaders/ next to the exe) and the raw dev project still load from disk.
+    const bool pakShaders = packed && !Package::List("shaders/").empty();
+    if (pakShaders) LoadBuiltinShadersPackaged(render);
+    else            LoadBuiltinShaders(render, "shaders");
     render->setMSAA(msaaSamples);            // before init: pipelines build at the right sample count
     render->setHDR(hdrEnabled);              // before init: scene format (RGBA16F / RGBA8)
     render->setHDROutput(hdrEnabled);        // before init: HDR10 display output (Player only; SDR fallback if no HDR display)
@@ -138,9 +180,18 @@ int main()
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
     // Load the project's assets so the world resolves meshGuid/matGuid/shaderGuid references.
-    ResDB::getSingleton()->LoadContentDir(app->contentRoot);
-    ResDB::getSingleton()->LoadShadersDir("shaders");
-    ResDB::getSingleton()->LoadShadersDir(app->contentRoot);
+    if (packed)
+    {
+        ResDB::getSingleton()->LoadContentPackaged();
+        if (!pakShaders) ResDB::getSingleton()->LoadShadersDir("shaders");   // legacy dist: loose shaders/ next to the exe
+        ResDB::getSingleton()->LoadShadersPackaged();   // content + built-in shaders straight from pak bytes
+    }
+    else
+    {
+        ResDB::getSingleton()->LoadContentDir(app->contentRoot);
+        ResDB::getSingleton()->LoadShadersDir("shaders");
+        ResDB::getSingleton()->LoadShadersDir(app->contentRoot);
+    }
     ResDB::getSingleton()->BuildShaderPipelines(render);
     ResDB::getSingleton()->CreateRenderTextures(render);   // RTs for RenderTextures
 
