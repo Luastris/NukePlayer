@@ -148,6 +148,7 @@ int main()
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
     wd.maximized   = config->window.maximized;
+    wd.mode        = config->window.mode;          // 0 windowed / 1 borderless / 2 exclusive fullscreen
     wd.fullscreen  = config->window.fullscreen;
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
