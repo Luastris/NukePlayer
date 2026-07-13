@@ -19,6 +19,7 @@
 #include <API/Model/Camera.h>
 #include <API/Model/Time.h>
 #include <API/Model/Jobs.h>     // core job system (2.4)
+#include <API/Model/Log.h>      // SetConsoleEcho (perf: drop the slow conhost write)
 
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -35,6 +36,12 @@ int main()
 {
     AppInstance* app = AppInstance::GetSingleton();
     app->setEditor(false);   // not the editor — plugins see isEditor() == false
+    // A shipped game hides the OS console window (config window.showConsole=false). Do it
+    // early so it flashes as little as possible; a console shared with a terminal is kept.
+    Config::SetConsoleWindowVisible(Config::getSingleton()->window.showConsole);
+    // Drop the slow OS-console log write when config asks (logToConsole=false) — the Player
+    // has no in-app console, so this discards output (no conhost cost).
+    nuke::Log::SetConsoleEcho(Config::getSingleton()->logToConsole);
     cout << "[player]\t\t" << "NukePlayer starting..." << endl;
 
     // Packed vs raw (3.2). A shipped game carries content/game.nupak (the dist layout keeps
