@@ -160,6 +160,7 @@ int main()
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
     wd.backend     = config->window.backend;   // D3D11 / D3D12
+    wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, double-click friendly)
 
     // Phase 2 (PHASE_RUNTIME): activate THIS project's chosen plugins (the load list in
     // project/game.nuproj). OnLoad registers their component types BEFORE we deserialize
@@ -185,6 +186,7 @@ int main()
     render->setHDROutput(hdrEnabled);        // before init: HDR10 display output (Player only; SDR fallback if no HDR display)
     render->setHDRNits(hdrPaperWhite, hdrPeak);
     render->init(wd);
+    render->setVSync(config->window.vsync);   // honour the game's vsync choice (Game.SetVSync persists it)
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
     // Load the project's assets so the world resolves meshGuid/matGuid/shaderGuid references.
