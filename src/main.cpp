@@ -144,8 +144,8 @@ int main()
     render->setOnRender([] {
         AppInstance* a = AppInstance::GetSingleton();
         Time::getSingleton()->NewFrame();
-        a->currentScene->Update();        // per-frame game logic (fixed-step runs on its own thread)
-        a->currentScene->Render(a->render);
+        a->currentWorld->Update();        // per-frame game logic (fixed-step runs on its own thread)
+        a->currentWorld->Render(a->render);
     });
 
     WindowDesc wd;
@@ -208,20 +208,20 @@ int main()
     // Load the project's default world from content (game: load project -> load its default world).
     cout << "[player]\t\t" << "Loading default world '" << startupWorld << "'..." << endl;
     if (!app->OpenWorld(startupWorld))
-        app->currentScene->LoadFromFile(kWorld);   // fallback: legacy world next to the exe
+        app->currentWorld->LoadFromFile(kWorld);   // fallback: legacy world next to the exe
 
     // Fallback: a world authored in the editor has no camera (the editor camera is excluded
     // from saves). Add a default one so the game still shows something.
     bool hasCam = false;
-    for (Atom* go : app->currentScene->GetHierarchy())
-        if (go && go->GetComponent<Camera>()) { hasCam = true; break; }
+    for (Atom* atom : app->currentWorld->GetHierarchy())
+        if (atom && atom->GetComponent<Camera>()) { hasCam = true; break; }
     if (!hasCam)
     {
         Atom* camAtom = new Atom("Main Camera");
         Camera* cam = new Camera(camAtom, render);   // renderTarget defaults to 0 -> backbuffer
         cam->fov = 60.0f;
         cam->transform->position = { 0, 0, -5 };
-        app->currentScene->Add(camAtom);
+        app->currentWorld->Add(camAtom);
         cout << "[player]\t\t" << "World had no camera — added a default Main Camera." << endl;
     }
 
