@@ -7,6 +7,7 @@
 
 #include <NukeEngine.h>                 // bst/bc aliases + NUKEENGINE_API
 #include <interface/AppInstance.h>
+#include <input/DesktopInput.h>   // gameplay input provider (keyboard/mouse)
 #include <interface/Modular.h>
 #include <interface/Services.h>
 #include <config.h>
@@ -17,6 +18,8 @@
 #include <API/Model/resdb.h>
 #include <API/Model/Package.h>   // packed game + mod overlays (3.2)
 #include <API/Model/Camera.h>
+#include <API/Model/Layers.h>    // render-layer slot names from the project manifest
+#include <API/Model/Screen.h>    // live game-screen size (scripts/canvas)
 #include <API/Model/Time.h>
 #include <API/Model/Jobs.h>     // core job system (2.4)
 #include <API/Model/Log.h>      // SetConsoleEcho (perf: drop the slow conhost write)
@@ -75,6 +78,7 @@ int main()
     // The project manifest drives everything below (default world, AA/HDR, plugin list,
     // service providers) — from the pak when packed, from project/game.nuproj when raw.
     std::string startupWorld = kWorld;
+    std::string gameTitle = "NukePlayer";   // window title = the PROJECT's name (game.nuproj), not config
     int   msaaSamples = 4;
     bool  hdrEnabled  = true;
     float hdrPaperWhite = 200.0f, hdrPeak = 1000.0f;
@@ -94,6 +98,13 @@ int main()
             if (!pj.is_discarded())
             {
                 startupWorld = pj.value("startupWorld", startupWorld);
+                gameTitle    = pj.value("name", gameTitle);   // the game's name = the project's name
+                if (pj.contains("layers") && pj["layers"].is_array())   // render-layer slot names
+                {
+                    std::vector<std::string> names;
+                    for (auto& n : pj["layers"]) names.push_back(n.is_string() ? n.get<std::string>() : std::string());
+                    Layers::SetAll(names);
+                }
                 msaaSamples  = pj.value("msaa", 4);
                 hdrEnabled   = pj.value("hdr", true);
                 hdrPaperWhite = pj.value("hdrPaperWhite", 200.0f);
@@ -143,6 +154,7 @@ int main()
     // the game logic always runs.
     render->setOnRender([] {
         AppInstance* a = AppInstance::GetSingleton();
+        nuke::Screen::Set(a->render->width, a->render->height);   // live game-screen size for scripts/canvas
         Time::getSingleton()->NewFrame();
         a->currentWorld->Update();        // per-frame game logic (fixed-step runs on its own thread)
         a->currentWorld->Render(a->render);
@@ -150,7 +162,7 @@ int main()
 
     WindowDesc wd;
     wd.w = config->window.w; wd.h = config->window.h;
-    wd.title       = config->window.title.c_str();
+    wd.title       = gameTitle.c_str();   // the PROJECT's name (game.nuproj), not a config field
     wd.decorated   = config->window.decorated;
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
@@ -187,6 +199,7 @@ int main()
     render->setHDRNits(hdrPaperWhite, hdrPeak);
     render->init(wd);
     render->setVSync(config->window.vsync);   // honour the game's vsync choice (Game.SetVSync persists it)
+    nuke::InstallDesktopInput(render);         // gameplay input: keyboard/mouse -> Input controls
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
     // Load the project's assets so the world resolves meshGuid/matGuid/shaderGuid references.
