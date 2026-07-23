@@ -124,6 +124,10 @@ int main()
     // render provider, get its iRender through the service registry.
     cout << "[player]\t\t" << "Loading modules..." << endl;
     InitModules(app);
+    // A RAW project carries its own game modules in <project>/modules (the 6.0 workflow) —
+    // scan them too, or the game's native code never loads outside the editor. Packed games
+    // ship their modules next to the exe (already covered by the cwd scan above).
+    if (!packed) DiscoverModulesIn("project/modules");
     NUKEModule* renderPlugin = FindServiceProvider("render", renderChoice);
     if (!renderPlugin)
     {
@@ -182,6 +186,10 @@ int main()
     for (auto& m : GetModules())
     {
         if (m->phase() == PHASE_BOOT) continue;
+        // Editor TOOLING modules (asset editors, importers) have no business in a game —
+        // skip them even under "no list -> load everything" (a dev pool dir has them all).
+        // editorTool is ABI 2: never call it on an older DLL (its vtable lacks the slot).
+        if (ModuleAbi(m.get()) >= 2 && m->editorTool()) continue;
         bool want = !haveList ||
             std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
         if (want) EnablePlugin(m.get());
@@ -245,6 +253,10 @@ int main()
 
     app->StopFixedThread();
     nuke::Jobs::Shutdown();
+    // UnloadModules runs the FULL DisablePlugin per module: live module-owned components
+    // (game modules!) are downgraded/destroyed while their DLL code is still mapped —
+    // clearing the world here instead would HIDE them from that downgrade and leak
+    // module-code std::functions (Events subscriptions) into the CRT teardown.
     UnloadModules();   // runtime plugins first, then the render provider (its Shutdown deinits)
     return 0;
 }
