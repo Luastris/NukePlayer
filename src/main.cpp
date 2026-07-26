@@ -50,11 +50,15 @@ int main()
     // Packed vs raw (3.2). A shipped game carries content/game.nupak (the dist layout keeps
     // the root clean); the raw project/ tree is the DEV path and exists only in dev builds —
     // a RELEASE Player refuses to run without a pak (release-release opens no raw projects).
+    // The whole dist layout resolves against the EXECUTABLE's directory, never the process
+    // CWD — a shortcut/Start-menu/terminal launch runs the game with an arbitrary working
+    // directory (same rule as Config::baseDir() and the built-in shader dir).
+    const bfs::path exeRoot = Config::baseDir();
     std::string pakPath;
     {
         boost::system::error_code ec;
-        if      (bfs::exists("content/game.nupak", ec)) pakPath = "content/game.nupak";
-        else if (bfs::exists("game.nupak", ec))         pakPath = "game.nupak";
+        if      (bfs::exists(exeRoot / "content" / "game.nupak", ec)) pakPath = (exeRoot / "content" / "game.nupak").string();
+        else if (bfs::exists(exeRoot / "game.nupak", ec))             pakPath = (exeRoot / "game.nupak").string();
     }
     const bool packed = !pakPath.empty();
     if (packed)
@@ -64,7 +68,7 @@ int main()
         // the game (the project pak stays immutable). MountMods resolves paths tolerantly
         // and orders by DEPENDENCIES (a mod's "requires" from its mod.json mount below it;
         // config order among independents; missing dependency -> the mod is skipped).
-        Package::MountMods(".");
+        Package::MountMods(exeRoot.string());
     }
 #ifdef NDEBUG
     else
@@ -78,7 +82,8 @@ int main()
     // The project manifest drives everything below (default world, AA/HDR, plugin list,
     // service providers) — from the pak when packed, from project/game.nuproj when raw.
     std::string startupWorld = kWorld;
-    std::string gameTitle = "NukePlayer";   // window title = the PROJECT's name (game.nuproj), not config
+    static std::string gameTitle = "NukePlayer";   // window title = the PROJECT's name (game.nuproj), not config
+                                                   // (static: the frame lambda below reads it for the FPS readout)
     int   msaaSamples = 4;
     bool  hdrEnabled  = true;
     float hdrPaperWhite = 200.0f, hdrPeak = 1000.0f;
@@ -89,7 +94,7 @@ int main()
         if (packed) Package::Read("game.nuproj", manifest);
         else
         {
-            bfs::ifstream pf(bfs::path("project/game.nuproj"));
+            bfs::ifstream pf(exeRoot / "project" / "game.nuproj");
             if (pf) manifest.assign(std::istreambuf_iterator<char>(pf), std::istreambuf_iterator<char>());
         }
         if (!manifest.empty())
@@ -127,7 +132,7 @@ int main()
     // A RAW project carries its own game modules in <project>/modules (the 6.0 workflow) —
     // scan them too, or the game's native code never loads outside the editor. Packed games
     // ship their modules next to the exe (already covered by the cwd scan above).
-    if (!packed) DiscoverModulesIn("project/modules");
+    if (!packed) DiscoverModulesIn((exeRoot / "project" / "modules").string());
     NUKEModule* renderPlugin = FindServiceProvider("render", renderChoice);
     if (!renderPlugin)
     {
@@ -146,7 +151,7 @@ int main()
 
     // Content paths (scripts etc.): packed -> the Package layer stack owns resolution
     // (ResolveContent consults the mounts); raw -> the dev project tree.
-    app->contentRoot = packed ? "" : "project/content";
+    app->contentRoot = packed ? "" : (exeRoot / "project" / "content").string();
 
     Config* config = Config::getSingleton();
     app->config   = config;
@@ -162,6 +167,21 @@ int main()
         Time::getSingleton()->NewFrame();
         a->currentWorld->Update();        // per-frame game logic (fixed-step runs on its own thread)
         a->currentWorld->Render(a->render);
+        // FPS readout (config window.showFps): rolling average appended to the window title, 2x/sec.
+        if (a->config && a->config->window.showFps)
+        {
+            static double acc = 0.0; static int frames = 0;
+            acc += Time::getSingleton()->delta;   // REAL seconds (unaffected by game time scale)
+            ++frames;
+            if (acc >= 0.5)
+            {
+                char t[320];
+                snprintf(t, sizeof(t), "%s | %d FPS (%.1f ms)", gameTitle.c_str(),
+                         (int)(frames / acc + 0.5), 1000.0 * acc / frames);
+                a->render->setWindowTitle(t);
+                acc = 0.0; frames = 0;
+            }
+        }
     });
 
     WindowDesc wd;
@@ -176,6 +196,7 @@ int main()
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
     wd.backend     = config->window.backend;   // D3D11 / D3D12
+    wd.rayTracing  = config->window.rayTracing;   // false = force the raster path (window.rayTracing)
     wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, double-click friendly)
 
     // Phase 2 (PHASE_RUNTIME): activate THIS project's chosen plugins (the load list in
