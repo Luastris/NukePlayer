@@ -28,12 +28,19 @@
 #include <boost/filesystem/fstream.hpp>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <iostream>
 namespace bfs = boost::filesystem;
 using namespace std;
 using namespace nuke;
 
 static const char* kWorld = "scene.nuworld";
+
+// Boot phases (window first, content later): the window opens as soon as the renderer is up;
+// assets and the world stream in behind it (worker + async world load) with progress in the
+// window title. 0 = pre-boot, 1 = content scan on a worker, 2 = pipelines + world staging /
+// activating (driven per frame from onRender), 3 = running.
+static std::atomic<int> g_boot{ 0 };
 
 int main()
 {
@@ -64,6 +71,12 @@ int main()
     if (packed)
     {
         if (!Package::Mount(pakPath, 0)) { cout << "[player]\t\t" << "Bad package: " << pakPath << ". Aborting." << endl; return 1; }
+        // DLC layer between the base (0) and the mods (1000+): content/dlc/*.nupak, each bound
+        // to this base by the name recorded in its pak.json (a legacy base has no name — then
+        // folder placement is the only binding).
+        Package::PakInfo basePak;
+        Package::ReadPakInfo(pakPath, basePak);
+        Package::MountDlcs(exeRoot.string(), basePak.name);
         // Mods: config/mods.json {"mods": ["mods/foo.numod", ...]} — user-editable next to
         // the game (the project pak stays immutable). MountMods resolves paths tolerantly
         // and orders by DEPENDENCIES (a mod's "requires" from its mod.json mount below it;
@@ -165,10 +178,55 @@ int main()
         AppInstance* a = AppInstance::GetSingleton();
         nuke::Screen::Set(a->render->width, a->render->height);   // live game-screen size for scripts/canvas
         Time::getSingleton()->NewFrame();
+        // Boot phase 2: finish material pipelines a few per frame (the window keeps pumping —
+        // no "Not responding"), then activate the staged world; progress rides the title bar.
+        if (g_boot.load() == 2)
+        {
+            const int left = ResDB::getSingleton()->BuildShaderPipelinesStep(a->render, 3);
+            char t[256];
+            if (left > 0)
+                snprintf(t, sizeof(t), "%s | Compiling shaders... (%d left)", gameTitle.c_str(), left);
+            else
+            {
+                if (a->WorldLoadReady())
+                    a->ActivateLoadedWorld();   // World::Update (below) swaps at the frame boundary
+                const double lp = a->WorldLoadProgress(), ap = a->WorldActivationProgress();
+                if      (ap >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), 50 + (int)(ap * 50.0));
+                else if (lp >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), (int)(lp * 50.0));
+                else
+                {
+                    // World finished (or failed and logged). Legacy fallback + camera fallback,
+                    // exactly what the old synchronous boot did after OpenWorld.
+                    if (a->currentWorld->GetHierarchy().empty())
+                    {
+                        boost::system::error_code ec;
+                        if (bfs::exists(bfs::path(kWorld), ec))
+                            a->currentWorld->LoadFromFile(kWorld);   // legacy world next to the exe
+                    }
+                    bool hasCam = false;
+                    for (Atom* atom : a->currentWorld->GetHierarchy())
+                        if (atom && atom->GetComponent<Camera>()) { hasCam = true; break; }
+                    if (!hasCam)
+                    {
+                        Atom* camAtom = new Atom("Main Camera");
+                        Camera* cam = new Camera(camAtom, a->render);   // renderTarget 0 -> backbuffer
+                        cam->fov = 60.0f;
+                        cam->transform->position = { 0, 0, -5 };
+                        a->currentWorld->Add(camAtom);
+                        cout << "[player]\t\t" << "World had no camera — added a default Main Camera." << endl;
+                    }
+                    g_boot = 3;
+                    snprintf(t, sizeof(t), "%s", gameTitle.c_str());
+                    cout << "[player]\t\t" << "Running." << endl;
+                }
+            }
+            a->render->setWindowTitle(t);
+        }
         a->currentWorld->Update();        // per-frame game logic (fixed-step runs on its own thread)
         a->currentWorld->Render(a->render);
         // FPS readout (config window.showFps): rolling average appended to the window title, 2x/sec.
-        if (a->config && a->config->window.showFps)
+        // Suppressed while booting — the title carries the loading progress then.
+        if (g_boot.load() == 3 && a->config && a->config->window.showFps)
         {
             static double acc = 0.0; static int frames = 0;
             acc += Time::getSingleton()->delta;   // REAL seconds (unaffected by game time scale)
@@ -231,45 +289,48 @@ int main()
     nuke::InstallDesktopInput(render);         // gameplay input: keyboard/mouse -> Input controls
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
-    // Load the project's assets so the world resolves meshGuid/matGuid/shaderGuid references.
-    if (packed)
-    {
-        ResDB::getSingleton()->LoadContentPackaged();
-        if (!pakShaders) ResDB::getSingleton()->LoadShadersDir("shaders");   // legacy dist: loose shaders/ next to the exe
-        ResDB::getSingleton()->LoadShadersPackaged();   // content + built-in shaders straight from pak bytes
-    }
-    else
-    {
-        ResDB::getSingleton()->LoadContentDir(app->contentRoot);
-        ResDB::getSingleton()->LoadShadersDir("shaders");
-        ResDB::getSingleton()->LoadShadersDir(app->contentRoot);
-    }
-    ResDB::getSingleton()->BuildShaderPipelines(render);
-    ResDB::getSingleton()->CreateRenderTextures(render);   // RTs for RenderTextures
-
-    // Load the project's default world from content (game: load project -> load its default world).
-    cout << "[player]\t\t" << "Loading default world '" << startupWorld << "'..." << endl;
-    if (!app->OpenWorld(startupWorld))
-        app->currentWorld->LoadFromFile(kWorld);   // fallback: legacy world next to the exe
-
-    // Fallback: a world authored in the editor has no camera (the editor camera is excluded
-    // from saves). Add a default one so the game still shows something.
-    bool hasCam = false;
-    for (Atom* atom : app->currentWorld->GetHierarchy())
-        if (atom && atom->GetComponent<Camera>()) { hasCam = true; break; }
-    if (!hasCam)
-    {
-        Atom* camAtom = new Atom("Main Camera");
-        Camera* cam = new Camera(camAtom, render);   // renderTarget defaults to 0 -> backbuffer
-        cam->fov = 60.0f;
-        cam->transform->position = { 0, 0, -5 };
-        app->currentWorld->Add(camAtom);
-        cout << "[player]\t\t" << "World had no camera — added a default Main Camera." << endl;
-    }
-
-    cout << "[player]\t\t" << "Running." << endl;
+    // Fixed thread + workers BEFORE the content load: the load itself runs on a worker now.
+    // FixedUpdate over the still-empty world is a no-op; physics of streamed-in atoms syncs
+    // under the game lock as they activate.
     app->StartFixedThread();   // fixed-frequency update (physics + FixedUpdate), frame-independent
     nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
+
+    // Load the project's assets in the BACKGROUND: the window is already up and presenting
+    // (clear frames + "Loading..." in the title) instead of freezing behind an unpainted
+    // window for the whole scan. Worker half = disk/CPU asset registration; the GPU tail
+    // (render textures) and the world staging hop back to the game thread — RunOnMain is
+    // pumped by World::Update from frame one. Material pipelines compile a few per frame in
+    // onRender (g_boot == 2 block above), then the world activates incrementally.
+    g_boot = 1;
+    {
+        const bool packedJob = packed, pakShadersJob = pakShaders;
+        const std::string contentRootJob = app->contentRoot, worldJob = startupWorld;
+        nuke::Jobs::Schedule([packedJob, pakShadersJob, contentRootJob, worldJob]()
+        {
+            if (packedJob)
+            {
+                ResDB::getSingleton()->LoadContentPackaged();
+                if (!pakShadersJob) ResDB::getSingleton()->LoadShadersDir("shaders");   // legacy dist: loose shaders/ next to the exe
+                ResDB::getSingleton()->LoadShadersPackaged();   // content + built-in shaders straight from pak bytes
+            }
+            else
+            {
+                ResDB::getSingleton()->LoadContentDir(contentRootJob);
+                ResDB::getSingleton()->LoadShadersDir("shaders");
+                ResDB::getSingleton()->LoadShadersDir(contentRootJob);
+            }
+            if (nuke::Jobs::Stopping()) return;   // window closed mid-load: exit promptly (Shutdown joins us)
+            nuke::Jobs::RunOnMain([worldJob]()
+            {
+                AppInstance* a = AppInstance::GetSingleton();
+                ResDB::getSingleton()->CreateRenderTextures(a->render);   // RTs for RenderTextures
+                cout << "[player]\t\t" << "Loading default world '" << worldJob << "' (async)..." << endl;
+                a->SetWorldActivationBudget(8.0);   // ms/frame: stream atoms in instead of one big hitch
+                a->StartWorldLoadAsync(worldJob);   // read+merge+parse on a worker
+                g_boot = 2;                         // onRender: pipelines per frame -> activate -> run
+            });
+        });
+    }
     render->loop();
 
     app->StopFixedThread();
