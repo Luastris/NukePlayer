@@ -1,9 +1,6 @@
-// NukePlayer — the runtime host (ships a game, no editor).
-//
-// Same host plumbing as the editor minus all editor/UI: it loads the renderer module and
-// gameplay plugins, loads a .nuworld, then each frame ticks time, runs game logic
-// (World::Update) and renders (World::Render). Cameras render to the backbuffer (target 0),
-// so the scene fills the window (the editor instead renders into an offscreen RT).
+// NukePlayer — the runtime host (ships a game, no editor): loads the renderer module and the
+// gameplay plugins, loads a .nuworld, then ticks World::Update / World::Render each frame.
+// Cameras render to the backbuffer (target 0), unlike the editor's offscreen RT.
 
 #include <NukeEngine.h>                 // bst/bc aliases + NUKEENGINE_API
 #include <interface/AppInstance.h>
@@ -16,13 +13,13 @@
 #include <API/Model/World.h>
 #include <API/Model/Atom.h>
 #include <API/Model/resdb.h>
-#include <API/Model/Package.h>   // packed game + mod overlays (3.2)
+#include <API/Model/Package.h>   // packed game + mod overlays
 #include <API/Model/Camera.h>
 #include <API/Model/Layers.h>    // render-layer slot names from the project manifest
 #include <API/Model/Screen.h>    // live game-screen size (scripts/canvas)
 #include <API/Model/Time.h>
-#include <API/Model/Jobs.h>     // core job system (2.4)
-#include <API/Model/Log.h>      // SetConsoleEcho (perf: drop the slow conhost write)
+#include <API/Model/Jobs.h>     // core job system
+#include <API/Model/Log.h>
 
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
@@ -36,30 +33,22 @@ using namespace nuke;
 
 static const char* kWorld = "scene.nuworld";
 
-// Boot phases (window first, content later): the window opens as soon as the renderer is up;
-// assets and the world stream in behind it (worker + async world load) with progress in the
-// window title. 0 = pre-boot, 1 = content scan on a worker, 2 = pipelines + world staging /
-// activating (driven per frame from onRender), 3 = running.
+// Boot phase: 0 = pre-boot, 1 = content scan on a worker, 2 = pipelines + world staging
+// (driven per frame from onRender), 3 = running.
 static std::atomic<int> g_boot{ 0 };
 
 int main()
 {
     AppInstance* app = AppInstance::GetSingleton();
-    app->setEditor(false);   // not the editor — plugins see isEditor() == false
-    // A shipped game hides the OS console window (config window.showConsole=false). Do it
-    // early so it flashes as little as possible; a console shared with a terminal is kept.
+    app->setEditor(false);   // plugins see isEditor() == false
+    // As early as possible, so a hidden console flashes as little as it can.
     Config::SetConsoleWindowVisible(Config::getSingleton()->window.showConsole);
-    // Drop the slow OS-console log write when config asks (logToConsole=false) — the Player
-    // has no in-app console, so this discards output (no conhost cost).
     nuke::Log::SetConsoleEcho(Config::getSingleton()->logToConsole);
     cout << "[player]\t\t" << "NukePlayer starting..." << endl;
 
-    // Packed vs raw (3.2). A shipped game carries content/game.nupak (the dist layout keeps
-    // the root clean); the raw project/ tree is the DEV path and exists only in dev builds —
-    // a RELEASE Player refuses to run without a pak (release-release opens no raw projects).
-    // The whole dist layout resolves against the EXECUTABLE's directory, never the process
-    // CWD — a shortcut/Start-menu/terminal launch runs the game with an arbitrary working
-    // directory (same rule as Config::baseDir() and the built-in shader dir).
+    // Packed vs raw: a shipped game carries content/game.nupak, the raw project/ tree is the
+    // DEV path only (a release Player refuses to run without a pak). The dist layout resolves
+    // against the EXECUTABLE's directory, NEVER the process CWD — launches carry any CWD.
     const bfs::path exeRoot = Config::baseDir();
     std::string pakPath;
     {
@@ -71,17 +60,11 @@ int main()
     if (packed)
     {
         if (!Package::Mount(pakPath, 0)) { cout << "[player]\t\t" << "Bad package: " << pakPath << ". Aborting." << endl; return 1; }
-        // DLC layer between the base (0) and the mods (1000+): content/dlc/*.nupak, each bound
-        // to this base by the name recorded in its pak.json (a legacy base has no name — then
-        // folder placement is the only binding).
+        // DLC layer sits between the base (0) and the mods (1000+).
         Package::PakInfo basePak;
         Package::ReadPakInfo(pakPath, basePak);
         Package::MountDlcs(exeRoot.string(), basePak.name);
-        // Mods: config/mods.json {"mods": ["mods/foo.numod", ...]} — user-editable next to
-        // the game (the project pak stays immutable). MountMods resolves paths tolerantly
-        // and orders by DEPENDENCIES (a mod's "requires" from its mod.json mount below it;
-        // config order among independents; missing dependency -> the mod is skipped).
-        Package::MountMods(exeRoot.string());
+        Package::MountMods(exeRoot.string());   // config/mods.json, ordered by dependencies
     }
 #ifdef NDEBUG
     else
@@ -92,11 +75,10 @@ int main()
     }
 #endif
 
-    // The project manifest drives everything below (default world, AA/HDR, plugin list,
-    // service providers) — from the pak when packed, from project/game.nuproj when raw.
+    // The project manifest drives everything below: from the pak when packed, from
+    // project/game.nuproj when raw.
     std::string startupWorld = kWorld;
-    static std::string gameTitle = "NukePlayer";   // window title = the PROJECT's name (game.nuproj), not config
-                                                   // (static: the frame lambda below reads it for the FPS readout)
+    static std::string gameTitle = "NukePlayer";   // static: the frame lambda below reads it
     int   msaaSamples = 4;
     bool  hdrEnabled  = true;
     float hdrPaperWhite = 200.0f, hdrPeak = 1000.0f;
@@ -116,7 +98,7 @@ int main()
             if (!pj.is_discarded())
             {
                 startupWorld = pj.value("startupWorld", startupWorld);
-                gameTitle    = pj.value("name", gameTitle);   // the game's name = the project's name
+                gameTitle    = pj.value("name", gameTitle);
                 if (pj.contains("layers") && pj["layers"].is_array())   // render-layer slot names
                 {
                     std::vector<std::string> names;
@@ -138,13 +120,12 @@ int main()
         }
     }
 
-    // Two-phase startup, phase 1 (PHASE_BOOT): discover the pool, enable the project's
-    // render provider, get its iRender through the service registry.
+    // Startup phase 1 (PHASE_BOOT): discover the pool, enable the project's render provider,
+    // get its iRender through the service registry.
     cout << "[player]\t\t" << "Loading modules..." << endl;
     InitModules(app);
-    // A RAW project carries its own game modules in <project>/modules (the 6.0 workflow) —
-    // scan them too, or the game's native code never loads outside the editor. Packed games
-    // ship their modules next to the exe (already covered by the cwd scan above).
+    // A RAW project keeps its game modules in <project>/modules; packed games ship theirs
+    // next to the exe (already covered above).
     if (!packed) DiscoverModulesIn((exeRoot / "project" / "modules").string());
     NUKEModule* renderPlugin = FindServiceProvider("render", renderChoice);
     if (!renderPlugin)
@@ -162,24 +143,21 @@ int main()
     }
     app->render = render;
 
-    // Content paths (scripts etc.): packed -> the Package layer stack owns resolution
-    // (ResolveContent consults the mounts); raw -> the dev project tree.
+    // Packed: the Package mount stack owns path resolution. Raw: the dev project tree.
     app->contentRoot = packed ? "" : (exeRoot / "project" / "content").string();
 
     Config* config = Config::getSingleton();
     app->config   = config;
     app->keyboard = KeyBoard::getSingleton();
     app->mouse    = Mouse::getSingleton();
-    app->playState = 1;   // the Player is always "playing" (so runtime systems like NukeGUI run)
+    app->playState = 1;   // always "playing", so runtime systems like NukeGUI run
 
-    // The per-frame game tick: advance time, run logic, draw. No editor, no PIE gating —
-    // the game logic always runs.
+    // The per-frame game tick: advance time, run logic, draw.
     render->setOnRender([] {
         AppInstance* a = AppInstance::GetSingleton();
-        nuke::Screen::Set(a->render->width, a->render->height);   // live game-screen size for scripts/canvas
+        nuke::Screen::Set(a->render->width, a->render->height);
         Time::getSingleton()->NewFrame();
-        // Boot phase 2: finish material pipelines a few per frame (the window keeps pumping —
-        // no "Not responding"), then activate the staged world; progress rides the title bar.
+        // Phase 2: a few material pipelines per frame so the window keeps pumping.
         if (g_boot.load() == 2)
         {
             const int left = ResDB::getSingleton()->BuildShaderPipelinesStep(a->render, 3);
@@ -189,14 +167,13 @@ int main()
             else
             {
                 if (a->WorldLoadReady())
-                    a->ActivateLoadedWorld();   // World::Update (below) swaps at the frame boundary
+                    a->ActivateLoadedWorld();   // World::Update below swaps at the frame boundary
                 const double lp = a->WorldLoadProgress(), ap = a->WorldActivationProgress();
                 if      (ap >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), 50 + (int)(ap * 50.0));
                 else if (lp >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), (int)(lp * 50.0));
                 else
                 {
-                    // World finished (or failed and logged). Legacy fallback + camera fallback,
-                    // exactly what the old synchronous boot did after OpenWorld.
+                    // The world is in (or failed and logged): legacy + camera fallbacks.
                     if (a->currentWorld->GetHierarchy().empty())
                     {
                         boost::system::error_code ec;
@@ -222,14 +199,13 @@ int main()
             }
             a->render->setWindowTitle(t);
         }
-        a->currentWorld->Update();        // per-frame game logic (fixed-step runs on its own thread)
+        a->currentWorld->Update();        // fixed-step logic runs on its own thread
         a->currentWorld->Render(a->render);
-        // FPS readout (config window.showFps): rolling average appended to the window title, 2x/sec.
-        // Suppressed while booting — the title carries the loading progress then.
+        // FPS readout in the title, 2x/sec. Not while booting: the title carries progress then.
         if (g_boot.load() == 3 && a->config && a->config->window.showFps)
         {
             static double acc = 0.0; static int frames = 0;
-            acc += Time::getSingleton()->delta;   // REAL seconds (unaffected by game time scale)
+            acc += Time::getSingleton()->delta;   // REAL seconds, ignores game time scale
             ++frames;
             if (acc >= 0.5)
             {
@@ -244,7 +220,7 @@ int main()
 
     WindowDesc wd;
     wd.w = config->window.w; wd.h = config->window.h;
-    wd.title       = gameTitle.c_str();   // the PROJECT's name (game.nuproj), not a config field
+    wd.title       = gameTitle.c_str();
     wd.decorated   = config->window.decorated;
     wd.resizable   = config->window.resizable;
     wd.floating    = config->window.floating;
@@ -254,53 +230,44 @@ int main()
     wd.transparent = config->window.transparent;
     wd.opacity     = config->window.opacity;
     wd.backend     = config->window.backend;   // D3D11 / D3D12
-    wd.rayTracing  = config->window.rayTracing;   // false = force the raster path (window.rayTracing)
-    wd.gpuValidation = config->gpuValidation;   // Debug GPU validation opt-in (config, double-click friendly)
+    wd.rayTracing  = config->window.rayTracing;   // false = force the raster path
+    wd.gpuValidation = config->gpuValidation;
 
-    // Phase 2 (PHASE_RUNTIME): activate THIS project's chosen plugins (the load list in
-    // project/game.nuproj). OnLoad registers their component types BEFORE we deserialize
-    // the world; types from plugins not in the list load as inert placeholders. No list ->
-    // load everything discovered (a packaged game ships its plugins). Boot providers are
-    // driven by "services", not the plugin list — skip them here.
+    // Phase 2 (PHASE_RUNTIME): enable the project's plugins. Their OnLoad must register the
+    // component types BEFORE the world is deserialized, or those types load as placeholders.
+    // No list -> enable everything discovered. Boot providers come from "services" instead.
     for (auto& m : GetModules())
     {
         if (m->phase() == PHASE_BOOT) continue;
-        // Editor TOOLING modules (asset editors, importers) have no business in a game —
-        // skip them even under "no list -> load everything" (a dev pool dir has them all).
-        // editorTool is ABI 2: never call it on an older DLL (its vtable lacks the slot).
+        // Editor tooling never runs in a game. editorTool is ABI 2: never call it on an
+        // older DLL, whose vtable lacks the slot.
         if (ModuleAbi(m.get()) >= 2 && m->editorTool()) continue;
         bool want = !haveList ||
             std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
         if (want) EnablePlugin(m.get());
     }
 
-    // Built-in shaders: a packed game carries them INSIDE game.nupak ("shaders/" entries) —
-    // no loose shaders/ dir ships, and mods can override any of them. Older dists (loose
-    // shaders/ next to the exe) and the raw dev project still load from disk.
+    // A packed game carries the built-in shaders INSIDE game.nupak; older dists and the raw
+    // dev project load them from a loose shaders/ dir.
     const bool pakShaders = packed && !Package::List("shaders/").empty();
     if (pakShaders) LoadBuiltinShadersPackaged(render);
     else            LoadBuiltinShaders(render, "shaders");
-    render->setMSAA(msaaSamples);            // before init: pipelines build at the right sample count
-    render->setHDR(hdrEnabled);              // before init: scene format (RGBA16F / RGBA8)
-    render->setHDROutput(hdrEnabled);        // before init: HDR10 display output (Player only; SDR fallback if no HDR display)
+    // All four MUST precede init(): they decide sample count, scene format and swapchain output.
+    render->setMSAA(msaaSamples);
+    render->setHDR(hdrEnabled);
+    render->setHDROutput(hdrEnabled);        // HDR10 display output; SDR fallback if unsupported
     render->setHDRNits(hdrPaperWhite, hdrPeak);
     render->init(wd);
-    render->setVSync(config->window.vsync);   // honour the game's vsync choice (Game.SetVSync persists it)
-    nuke::InstallDesktopInput(render);         // gameplay input: keyboard/mouse -> Input controls
+    render->setVSync(config->window.vsync);
+    nuke::InstallDesktopInput(render);         // keyboard/mouse -> Input controls
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
-    // Fixed thread + workers BEFORE the content load: the load itself runs on a worker now.
-    // FixedUpdate over the still-empty world is a no-op; physics of streamed-in atoms syncs
-    // under the game lock as they activate.
-    app->StartFixedThread();   // fixed-frequency update (physics + FixedUpdate), frame-independent
-    nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);   // worker pool (2.4)
+    // Both must start BEFORE the content load, which runs on a worker.
+    app->StartFixedThread();   // fixed-frequency update: physics + FixedUpdate
+    nuke::Jobs::Init(Config::getSingleton()->jobWorkers, Config::getSingleton()->jobPinCores);
 
-    // Load the project's assets in the BACKGROUND: the window is already up and presenting
-    // (clear frames + "Loading..." in the title) instead of freezing behind an unpainted
-    // window for the whole scan. Worker half = disk/CPU asset registration; the GPU tail
-    // (render textures) and the world staging hop back to the game thread — RunOnMain is
-    // pumped by World::Update from frame one. Material pipelines compile a few per frame in
-    // onRender (g_boot == 2 block above), then the world activates incrementally.
+    // Background asset load: the worker does disk/CPU registration, RunOnMain does render
+    // textures + world staging on the game thread, and pipelines follow in onRender.
     g_boot = 1;
     {
         const bool packedJob = packed, pakShadersJob = pakShaders;
@@ -310,8 +277,8 @@ int main()
             if (packedJob)
             {
                 ResDB::getSingleton()->LoadContentPackaged();
-                if (!pakShadersJob) ResDB::getSingleton()->LoadShadersDir("shaders");   // legacy dist: loose shaders/ next to the exe
-                ResDB::getSingleton()->LoadShadersPackaged();   // content + built-in shaders straight from pak bytes
+                if (!pakShadersJob) ResDB::getSingleton()->LoadShadersDir("shaders");   // legacy dist
+                ResDB::getSingleton()->LoadShadersPackaged();
             }
             else
             {
@@ -319,15 +286,15 @@ int main()
                 ResDB::getSingleton()->LoadShadersDir("shaders");
                 ResDB::getSingleton()->LoadShadersDir(contentRootJob);
             }
-            if (nuke::Jobs::Stopping()) return;   // window closed mid-load: exit promptly (Shutdown joins us)
+            if (nuke::Jobs::Stopping()) return;   // window closed mid-load: let Shutdown's join return
             nuke::Jobs::RunOnMain([worldJob]()
             {
                 AppInstance* a = AppInstance::GetSingleton();
-                ResDB::getSingleton()->CreateRenderTextures(a->render);   // RTs for RenderTextures
+                ResDB::getSingleton()->CreateRenderTextures(a->render);
                 cout << "[player]\t\t" << "Loading default world '" << worldJob << "' (async)..." << endl;
-                a->SetWorldActivationBudget(8.0);   // ms/frame: stream atoms in instead of one big hitch
-                a->StartWorldLoadAsync(worldJob);   // read+merge+parse on a worker
-                g_boot = 2;                         // onRender: pipelines per frame -> activate -> run
+                a->SetWorldActivationBudget(8.0);   // ms/frame
+                a->StartWorldLoadAsync(worldJob);
+                g_boot = 2;
             });
         });
     }
@@ -335,10 +302,8 @@ int main()
 
     app->StopFixedThread();
     nuke::Jobs::Shutdown();
-    // UnloadModules runs the FULL DisablePlugin per module: live module-owned components
-    // (game modules!) are downgraded/destroyed while their DLL code is still mapped —
-    // clearing the world here instead would HIDE them from that downgrade and leak
-    // module-code std::functions (Events subscriptions) into the CRT teardown.
-    UnloadModules();   // runtime plugins first, then the render provider (its Shutdown deinits)
+    // Do NOT clear the world first: UnloadModules runs the full DisablePlugin per module, so
+    // module-owned components must still be reachable while their DLL code is mapped.
+    UnloadModules();   // runtime plugins first, then the render provider
     return 0;
 }
