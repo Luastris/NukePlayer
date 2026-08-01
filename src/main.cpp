@@ -60,6 +60,7 @@ int main()
     if (packed)
     {
         if (!Package::Mount(pakPath, 0)) { cout << "[player]\t\t" << "Bad package: " << pakPath << ". Aborting." << endl; return 1; }
+        Package::MountPakParts(pakPath, 0);   // the base game's own split parts
         // DLC layer sits between the base (0) and the mods (1000+).
         Package::PakInfo basePak;
         Package::ReadPakInfo(pakPath, basePak);
