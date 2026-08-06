@@ -237,13 +237,29 @@ int main()
     // Phase 2 (PHASE_RUNTIME): enable the project's plugins. Their OnLoad must register the
     // component types BEFORE the world is deserialized, or those types load as placeholders.
     // No list -> enable everything discovered. Boot providers come from "services" instead.
+    // A module a mounted mod/DLC brought is enabled by the MOD being enabled: the game's own
+    // plugin list was written before that mod existed and cannot know it. Its DLLs live in the
+    // modcache dirs the mount produced — that provenance is the consent.
+    auto fromModCache = [](const std::string& modulePath)
+    {
+        boost::system::error_code ec;
+        std::string mp = bfs::absolute(bfs::path(modulePath), ec).generic_string();
+        for (char& c : mp) c = (char)tolower((unsigned char)c);
+        for (const std::string& d : Package::ModuleCacheDirs())
+        {
+            std::string dp = bfs::absolute(bfs::path(d), ec).generic_string();
+            for (char& c : dp) c = (char)tolower((unsigned char)c);
+            if (!dp.empty() && mp.rfind(dp, 0) == 0) return true;
+        }
+        return false;
+    };
     for (auto& m : GetModules())
     {
         if (m->phase() == PHASE_BOOT) continue;
         // Editor tooling never runs in a game. editorTool is ABI 2: never call it on an
         // older DLL, whose vtable lacks the slot.
         if (ModuleAbi(m.get()) >= 2 && m->editorTool()) continue;
-        bool want = !haveList ||
+        bool want = !haveList || fromModCache(m->modulePath) ||
             std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
         if (want) EnablePlugin(m.get());
     }
