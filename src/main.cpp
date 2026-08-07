@@ -39,6 +39,15 @@ static std::atomic<int> g_boot{ 0 };
 
 int main()
 {
+    // CWD = the WRITABLE root before anything reads config: relative writes (config/…,
+    // caches) must never land beside or inside an installed bundle. Dev tree and Windows:
+    // writableDir == run root — exactly the old behavior. Shipped assets are read through
+    // absolute run-root paths (RunRoot/baseDir), not the CWD.
+    {
+        boost::system::error_code ec;
+        bfs::create_directories(nuke::Config::writableDir(), ec);
+        bfs::current_path(nuke::Config::writableDir(), ec);
+    }
     AppInstance* app = AppInstance::GetSingleton();
     app->setEditor(false);   // plugins see isEditor() == false
     // As early as possible, so a hidden console flashes as little as it can.
