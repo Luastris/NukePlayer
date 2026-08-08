@@ -53,7 +53,7 @@ int main()
     // As early as possible, so a hidden console flashes as little as it can.
     Config::SetConsoleWindowVisible(Config::getSingleton()->window.showConsole);
     nuke::Log::SetConsoleEcho(Config::getSingleton()->logToConsole);
-    cout << "[player]\t\t" << "NukePlayer starting..." << endl;
+    cout << "[player]\t\t" << "NukePlayer (" << nuke::EngineVersion() << ") starting..." << endl;
 
     // Packed vs raw: a shipped game carries content/game.nupak, the raw project/ tree is the
     // DEV path only (a release Player refuses to run without a pak). The dist layout resolves
