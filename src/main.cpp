@@ -20,12 +20,14 @@
 #include <API/Model/Time.h>
 #include <API/Model/Jobs.h>     // core job system
 #include <API/Model/Log.h>
+#include <API/Model/CrashReport.h>   // fatal-failure bundles (config/crash)
 
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <vector>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>   // getenv (dev hooks)
 #include <iostream>
 namespace bfs = boost::filesystem;
 using namespace std;
@@ -39,6 +41,10 @@ static std::atomic<int> g_boot{ 0 };
 
 int main()
 {
+    nuke::CrashReport::Install("NukePlayer");   // fatal failures leave a bundle in config/crash
+    // DEV HOOK (like NUKE_PACKAGE): NUKE_CRASH_TEST=1 faults immediately — verifies the
+    // crash pipeline end-to-end (SEH filter -> minidump -> bundle -> pending marker).
+    if (std::getenv("NUKE_CRASH_TEST")) { volatile int* p = nullptr; *p = 1; }
     // CWD = the WRITABLE root before anything reads config: relative writes (config/…,
     // caches) must never land beside or inside an installed bundle. Dev tree and Windows:
     // writableDir == run root — exactly the old behavior. Shipped assets are read through
@@ -242,6 +248,8 @@ int main()
     wd.backend     = config->window.backend;   // D3D11 / D3D12
     wd.rayTracing  = config->window.rayTracing;   // false = force the raster path
     wd.gpuValidation = config->gpuValidation;
+    wd.clickThrough    = config->window.clickThrough;
+    wd.hideFromCapture = config->window.hideFromCapture;
 
     // Phase 2 (PHASE_RUNTIME): enable the project's plugins. Their OnLoad must register the
     // component types BEFORE the world is deserialized, or those types load as placeholders.
