@@ -5,6 +5,7 @@
 #include <NukeEngine.h>                 // bst/bc aliases + NUKEENGINE_API
 #include <interface/AppInstance.h>
 #include <input/DesktopInput.h>   // gameplay input provider (keyboard/mouse)
+#include <input/Input.h>          // Q6: explicit input-map list from the .nuproj
 #include <interface/Modular.h>
 #include <interface/Services.h>
 #include <config.h>
@@ -132,6 +133,13 @@ int main()
                 }
                 if (pj.contains("services") && pj["services"].is_object())
                     renderChoice = pj["services"].value("render", std::string());
+                // Q6: explicit input-map list — set BEFORE the content scan loads .nuinput files.
+                if (pj.contains("inputMaps") && pj["inputMaps"].is_array())
+                {
+                    std::vector<std::string> maps;
+                    for (auto& m : pj["inputMaps"]) if (m.is_string()) maps.push_back(m.get<std::string>());
+                    nuke::Input::SetEnabledMaps(maps);
+                }
             }
         }
     }
