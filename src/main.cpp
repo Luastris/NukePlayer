@@ -258,6 +258,7 @@ int main()
     wd.gpuValidation = config->gpuValidation;
     wd.clickThrough    = config->window.clickThrough;
     wd.hideFromCapture = config->window.hideFromCapture;
+    wd.textureStreamMB = config->window.textureStreamMB;   // T3 mip-streaming budget (0 = off)
 
     // Phase 2 (PHASE_RUNTIME): enable the project's plugins. Their OnLoad must register the
     // component types BEFORE the world is deserialized, or those types load as placeholders.
