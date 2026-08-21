@@ -42,6 +42,7 @@ static std::atomic<int> g_boot{ 0 };
 
 int main()
 {
+    nuke::Log::CaptureStd();   // FIRST: every later line carries its process-uptime stamp + lands in the ring
     nuke::CrashReport::Install("NukePlayer");   // fatal failures leave a bundle in config/crash
     // DEV HOOK (like NUKE_PACKAGE): NUKE_CRASH_TEST=1 faults immediately — verifies the
     // crash pipeline end-to-end (SEH filter -> minidump -> bundle -> pending marker).
