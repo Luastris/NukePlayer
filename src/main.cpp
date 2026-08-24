@@ -29,6 +29,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>   // getenv (dev hooks)
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#include <crtdbg.h>   // NUKE_ASSERT_STDERR: assertion dialogs -> stderr for headless probes
+#endif
 #include <iostream>
 namespace bfs = boost::filesystem;
 using namespace std;
@@ -43,6 +48,18 @@ static std::atomic<int> g_boot{ 0 };
 int main()
 {
     nuke::Log::CaptureStd();   // FIRST: every later line carries its process-uptime stamp + lands in the ring
+#if defined(_WIN32) && defined(_DEBUG)
+    // Headless probes: CRT assertion / error dialogs go to stderr (and abort) instead of a box
+    // nobody can click. Dev hook only; an interactive run keeps the dialogs.
+    if (std::getenv("NUKE_ASSERT_STDERR"))
+    {
+        _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE); _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_ERROR,  _CRTDBG_MODE_FILE); _CrtSetReportFile(_CRT_ERROR,  _CRTDBG_FILE_STDERR);
+        _CrtSetReportMode(_CRT_WARN,   _CRTDBG_MODE_FILE); _CrtSetReportFile(_CRT_WARN,   _CRTDBG_FILE_STDERR);
+        _set_error_mode(_OUT_TO_STDERR);
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    }
+#endif
     nuke::CrashReport::Install("NukePlayer");   // fatal failures leave a bundle in config/crash
     // DEV HOOK (like NUKE_PACKAGE): NUKE_CRASH_TEST=1 faults immediately — verifies the
     // crash pipeline end-to-end (SEH filter -> minidump -> bundle -> pending marker).
@@ -112,6 +129,7 @@ int main()
         }
         if (!manifest.empty())
         {
+            nuke::SetProjectManifest(manifest);   // shared pool: modules read their settings from it
             nlohmann::json pj = nlohmann::json::parse(manifest, nullptr, false);
             if (!pj.is_discarded())
             {
@@ -151,7 +169,20 @@ int main()
     InitModules(app);
     // A RAW project keeps its game modules in <project>/modules; packed games ship theirs
     // next to the exe (already covered above).
-    if (!packed) DiscoverModulesIn((exeRoot / "project" / "modules").string());
+    if (!packed)
+    {
+        // Project modules are split per build config (modules/Debug, modules/Release) so the
+        // editor and player each load a matching binary; the flat dir is the legacy fallback.
+#ifdef _DEBUG
+        const char* runCfg = "Debug";
+#else
+        const char* runCfg = "Release";
+#endif
+        boost::system::error_code mec;
+        bfs::path pmod = exeRoot / "project" / "modules" / runCfg;
+        if (!bfs::exists(pmod, mec)) pmod = exeRoot / "project" / "modules";
+        DiscoverModulesIn(pmod.string());
+    }
     NUKEModule* renderPlugin = FindServiceProvider("render", renderChoice);
     if (!renderPlugin)
     {
@@ -182,19 +213,21 @@ int main()
         AppInstance* a = AppInstance::GetSingleton();
         nuke::Screen::Set(a->render->width, a->render->height);
         Time::getSingleton()->NewFrame();
-        // Phase 2: a few material pipelines per frame so the window keeps pumping.
+        // Phase 2: material pipelines register a few per frame (they BUILD in the renderer's
+        // background thread — registration is cheap) and the world activates right away: draws
+        // use the boot / default pipelines until their own land. No "compiling" gate anymore.
         if (g_boot.load() == 2)
         {
-            const int left = ResDB::getSingleton()->BuildShaderPipelinesStep(a->render, 3);
+            ResDB::getSingleton()->BuildShaderPipelinesStep(a->render, 8);
             char t[256];
-            if (left > 0)
-                snprintf(t, sizeof(t), "%s | Compiling shaders... (%d left)", gameTitle.c_str(), left);
-            else
             {
                 if (a->WorldLoadReady())
                     a->ActivateLoadedWorld();   // World::Update below swaps at the frame boundary
                 const double lp = a->WorldLoadProgress(), ap = a->WorldActivationProgress();
-                if      (ap >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), 50 + (int)(ap * 50.0));
+                // Streaming boot: the game is RUNNING once the start zone (the ring around the
+                // camera) is in; the far world keeps growing under the budget behind the frame.
+                const bool zoneIn = ap >= 0 && a->WorldStartZoneReady() && a->currentWorld && !a->currentWorld->GetHierarchy().empty();
+                if      (ap >= 0 && !zoneIn) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), 50 + (int)(ap * 50.0));
                 else if (lp >= 0) snprintf(t, sizeof(t), "%s | Loading... %d%%", gameTitle.c_str(), (int)(lp * 50.0));
                 else
                 {
@@ -219,7 +252,7 @@ int main()
                     }
                     g_boot = 3;
                     snprintf(t, sizeof(t), "%s", gameTitle.c_str());
-                    cout << "[player]\t\t" << "Running." << endl;
+                    cout << "[player]\t\t" << "Running." << (ap >= 0 ? " (start zone in; the world keeps growing)" : "") << endl;
                 }
             }
             a->render->setWindowTitle(t);
@@ -286,8 +319,9 @@ int main()
         // Editor tooling never runs in a game. editorTool is ABI 2: never call it on an
         // older DLL, whose vtable lacks the slot.
         if (ModuleAbi(m.get()) >= 2 && m->editorTool()) continue;
-        bool want = !haveList || fromModCache(m->modulePath) ||
-            std::find(enabledPlugins.begin(), enabledPlugins.end(), m->moduleFile) != enabledPlugins.end();
+        bool want = !haveList || fromModCache(m->modulePath);
+        for (size_t pi2 = 0; !want && pi2 < enabledPlugins.size(); ++pi2)
+            want = nuke::ModuleFileMatches(enabledPlugins[pi2], m->moduleFile);   // names are platform-neutral
         if (want) EnablePlugin(m.get());
     }
 
