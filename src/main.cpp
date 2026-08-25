@@ -22,11 +22,13 @@
 #include <API/Model/Jobs.h>     // core job system
 #include <API/Model/Log.h>
 #include <API/Model/CrashReport.h>   // fatal-failure bundles (config/crash)
+#include <boost/thread.hpp>          // NUKE_HANG_STACK watchdog
 
 #include <nlohmann/json.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cstdlib>   // getenv (dev hooks)
 #ifdef _WIN32
@@ -72,6 +74,35 @@ int main()
     }
 #endif
     nuke::CrashReport::Install("NukePlayer");   // fatal failures leave a bundle in config/crash
+#ifdef _WIN32
+    // Dev hook NUKE_HANG_STACK=<sec>: when frames stop advancing that long, dump the main
+    // thread's symbolized stack to stderr and abort — a hung probe's only diagnosis.
+    if (const char* hs = std::getenv("NUKE_HANG_STACK"))
+    {
+        static HANDLE mainTh = nullptr;
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                        &mainTh, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        const int limit = std::max(2, atoi(hs));
+        boost::thread([limit]
+        {
+            double last = -1.0; int still = 0;
+            for (;;)
+            {
+                boost::this_thread::sleep_for(boost::chrono::seconds(1));
+                const double now = nuke::Time::getSingleton()->elapsed;
+                if (now != last) { last = now; still = 0; continue; }
+                if (++still < limit) continue;
+                fprintf(stderr, "[hang] main thread stalled %d s — stack:\n", still);
+                SuspendThread(mainTh);
+                CONTEXT ctx{}; ctx.ContextFlags = CONTEXT_FULL;
+                if (GetThreadContext(mainTh, &ctx)) nuke::CrashReport::PrintThreadBacktrace(mainTh, &ctx);
+                ResumeThread(mainTh);
+                fflush(stderr);
+                TerminateProcess(GetCurrentProcess(), 3);
+            }
+        }).detach();
+    }
+#endif
     // DEV HOOK (like NUKE_PACKAGE): NUKE_CRASH_TEST=1 faults immediately — verifies the
     // crash pipeline end-to-end (SEH filter -> minidump -> bundle -> pending marker).
     if (std::getenv("NUKE_CRASH_TEST")) { volatile int* p = nullptr; *p = 1; }
@@ -268,8 +299,29 @@ int main()
             }
             a->render->setWindowTitle(t);
         }
+        static const bool loopDbg = std::getenv("NUKE_LOOP_DEBUG") != nullptr;
+        static auto lastLoop = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point lu0, lu1, lr1;
+        if (loopDbg) lu0 = std::chrono::steady_clock::now();
         a->currentWorld->Update();        // fixed-step logic runs on its own thread
+        if (loopDbg) lu1 = std::chrono::steady_clock::now();
         a->currentWorld->Render(a->render);
+        if (loopDbg)
+        {
+            lr1 = std::chrono::steady_clock::now();
+            static int n = 0;
+            if (++n % 30 == 0)
+            {
+                auto ms = [](auto a2, auto b2) { return std::chrono::duration<double, std::milli>(b2 - a2).count(); };
+                if (FILE* lf = fopen("loopdbg.txt", "a"))
+                {
+                    fprintf(lf, "[loop] update=%.1f render=%.1f other=%.1f\n",
+                            ms(lu0, lu1), ms(lu1, lr1), ms(lastLoop, lu0));
+                    fclose(lf);
+                }
+            }
+            lastLoop = lr1;
+        }
         // FPS readout in the title, 2x/sec. Not while booting: the title carries progress then.
         if (g_boot.load() == 3 && a->config && a->config->window.showFps)
         {
