@@ -58,6 +58,17 @@ int main()
         _CrtSetReportMode(_CRT_WARN,   _CRTDBG_MODE_FILE); _CrtSetReportFile(_CRT_WARN,   _CRTDBG_FILE_STDERR);
         _set_error_mode(_OUT_TO_STDERR);
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+        // A symbolized backtrace with every CRT assert — a headless probe's only stack.
+        _CrtSetReportHook([](int reportType, char* message, int* ret) -> int
+        {
+            if (reportType == _CRT_ASSERT || reportType == _CRT_ERROR)
+            {
+                fprintf(stderr, "%s\n", message ? message : "(assert)");
+                nuke::CrashReport::PrintBacktrace();
+                fflush(stderr);
+            }
+            return 0;   // fall through to the regular stderr report
+        });
     }
 #endif
     nuke::CrashReport::Install("NukePlayer");   // fatal failures leave a bundle in config/crash
