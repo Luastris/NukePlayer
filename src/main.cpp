@@ -331,7 +331,8 @@ int main()
             if (acc >= 0.5)
             {
                 char t[320];
-                snprintf(t, sizeof(t), "%s | %d FPS (%.1f ms)", gameTitle.c_str(),
+                const char* be = a->render->backendName();   // "Vk" / "Dx11" / "Dx12", same cadence as the FPS
+                snprintf(t, sizeof(t), "%s | %s%s%d FPS (%.1f ms)", gameTitle.c_str(), be, (be && *be) ? " | " : "",
                          (int)(frames / acc + 0.5), 1000.0 * acc / frames);
                 a->render->setWindowTitle(t);
                 acc = 0.0; frames = 0;
