@@ -15,6 +15,7 @@
 #include <API/Model/Atom.h>
 #include <API/Model/resdb.h>
 #include <API/Model/Package.h>   // packed game + mod overlays
+#include <API/Model/FileIndex.h>  // the raw dev tree's live index
 #include <API/Model/Camera.h>
 #include <API/Model/Layers.h>    // render-layer slot names from the project manifest
 #include <API/Model/Screen.h>    // live game-screen size (scripts/canvas)
@@ -411,6 +412,9 @@ int main()
     // Background asset load: the worker does disk/CPU registration, RunOnMain does render
     // textures + world staging on the game thread, and pipelines follow in onRender.
     g_boot = 1;
+    // A raw dev tree joins the engine's file index (the boot scan reads it; later edits reach
+    // ResDB live); a packed game has nothing on disk to watch.
+    if (!packed) ResDB::getSingleton()->WatchContent(app->contentRoot, "shaders");
     {
         const bool packedJob = packed, pakShadersJob = pakShaders;
         const std::string contentRootJob = app->contentRoot, worldJob = startupWorld;
@@ -443,6 +447,7 @@ int main()
     render->loop();
 
     app->StopFixedThread();
+    nuke::FileIndex::Get().Shutdown();   // its handlers run through Jobs: before the pool goes
     nuke::Jobs::Shutdown();
     // Do NOT clear the world first: UnloadModules runs the full DisablePlugin per module, so
     // module-owned components must still be reachable while their DLL code is mapped.
