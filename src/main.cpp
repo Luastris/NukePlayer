@@ -429,6 +429,7 @@ int main()
             else
             {
                 ResDB::getSingleton()->LoadContentDir(contentRootJob);
+                ResDB::getSingleton()->LoadContentDir("fonts");   // engine fonts (the GUI's main font + fallbacks)
                 ResDB::getSingleton()->LoadShadersDir("shaders");
                 ResDB::getSingleton()->LoadShadersDir(contentRootJob);
             }
