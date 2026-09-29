@@ -22,6 +22,7 @@
 #include <API/Model/Time.h>
 #include <API/Model/Jobs.h>     // core job system
 #include <API/Model/Log.h>
+#include <API/Model/Quality.h>   // PT3 presets: Boot after render init
 #include <API/Model/CrashReport.h>   // fatal-failure bundles (config/crash)
 #include <boost/thread.hpp>          // NUKE_HANG_STACK watchdog
 
@@ -402,6 +403,7 @@ int main()
     render->setHDRNits(hdrPaperWhite, hdrPeak);
     render->init(wd);
     render->setVSync(config->window.vsync);
+    nuke::Quality::Boot(render);   // PT3: first-boot autodetect + the preset's live knobs (RT reflection, tessellation, streaming, upscale)
     nuke::InstallDesktopInput(render);         // keyboard/mouse -> Input controls
     cout << "[player]\t\t" << "Renderer ready." << endl;
 
